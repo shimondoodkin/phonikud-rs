@@ -1,14 +1,13 @@
 use anyhow::Result;
 use ort::{
     session::{
-        builder::{GraphOptimizationLevel, SessionBuilder},
+        builder::GraphOptimizationLevel,
         Session,
     },
-    value::Value,
+    value::Tensor,
 };
 use tokenizers::Tokenizer;
-use ndarray::Array;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 use regex::Regex;
 
 /// Hebrew diacritization model wrapper (internal)
@@ -19,7 +18,7 @@ pub struct PhonikudModel {
 
 impl PhonikudModel {
     pub fn new(model_path: &str, tokenizer_path: &str) -> Result<Self> {
-        let session = SessionBuilder::new()?
+        let session = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_intra_threads(4)?
             .commit_from_file(model_path)?;
@@ -52,32 +51,31 @@ impl PhonikudModel {
         let seq_len = input_ids.len();
 
         // 2. Build input tensors
-        let input_ids_tensor = Value::from_array(Array::from_shape_vec((1, seq_len), input_ids)?)?;
-        let attention_mask_tensor =
-            Value::from_array(Array::from_shape_vec((1, seq_len), attention_mask)?)?;
-        let token_type_ids_tensor =
-            Value::from_array(Array::from_shape_vec((1, seq_len), token_type_ids)?)?;
+        let input_ids_tensor = Tensor::from_array(([1, seq_len], input_ids))?;
+        let attention_mask_tensor = Tensor::from_array(([1, seq_len], attention_mask))?;
+        let token_type_ids_tensor = Tensor::from_array(([1, seq_len], token_type_ids))?;
 
-        // 3. Prepare input map
-        let mut inputs = HashMap::new();
-        inputs.insert("input_ids".to_string(), input_ids_tensor);
-        inputs.insert("attention_mask".to_string(), attention_mask_tensor);
-        inputs.insert("token_type_ids".to_string(), token_type_ids_tensor);
-
-        // 4. Run inference
-        let outputs = self.session.run(inputs)?;
+        // 3. Run inference
+        let outputs = self.session.run(ort::inputs![
+            "input_ids" => input_ids_tensor,
+            "attention_mask" => attention_mask_tensor,
+            "token_type_ids" => token_type_ids_tensor
+        ])?;
 
         // 5. Extract logits - access by index
-        let nikud_logits = outputs[0].try_extract_array::<f32>()?;
-        let shin_logits = outputs[1].try_extract_array::<f32>()?;
-        let additional_logits = outputs[2].try_extract_array::<f32>()?;
+        // try_extract_tensor returns (Shape, &[f32]) in ort rc.11
+        let (nikud_shape, nikud_data) = outputs[0].try_extract_tensor::<f32>()?;
+        let (shin_shape, shin_data) = outputs[1].try_extract_tensor::<f32>()?;
+        let (add_shape, add_data) = outputs[2].try_extract_tensor::<f32>()?;
 
-        // 6. Get predictions
-        let nikud_preds: Vec<usize> = nikud_logits
-            .slice(ndarray::s![0, .., ..])
-            .outer_iter()
-            .map(|token| {
-                token
+        // 6. Get predictions using manual flat-data indexing
+        // nikud_logits shape: [1, seq_len, num_nikud_classes]
+        let nikud_seq = nikud_shape[1] as usize;
+        let nikud_classes = nikud_shape[2] as usize;
+        let nikud_preds: Vec<usize> = (0..nikud_seq)
+            .map(|t| {
+                let offset = t * nikud_classes;
+                nikud_data[offset..offset + nikud_classes]
                     .iter()
                     .enumerate()
                     .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
@@ -86,11 +84,13 @@ impl PhonikudModel {
             })
             .collect();
 
-        let shin_preds: Vec<usize> = shin_logits
-            .slice(ndarray::s![0, .., ..])
-            .outer_iter()
-            .map(|token| {
-                token
+        // shin_logits shape: [1, seq_len, num_shin_classes]
+        let shin_seq = shin_shape[1] as usize;
+        let shin_classes = shin_shape[2] as usize;
+        let shin_preds: Vec<usize> = (0..shin_seq)
+            .map(|t| {
+                let offset = t * shin_classes;
+                shin_data[offset..offset + shin_classes]
                     .iter()
                     .enumerate()
                     .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
@@ -99,23 +99,17 @@ impl PhonikudModel {
             })
             .collect();
 
-        // Additional predictions: stress, vocal_shva, prefix
-        let stress_preds: Vec<bool> = additional_logits
-            .slice(ndarray::s![0, .., 0])
-            .iter()
-            .map(|&x| x > 0.0)
+        // additional_logits shape: [1, seq_len, 3] (stress, vocal_shva, prefix)
+        let add_seq = add_shape[1] as usize;
+        let add_cols = add_shape[2] as usize;
+        let stress_preds: Vec<bool> = (0..add_seq)
+            .map(|t| add_data[t * add_cols + 0] > 0.0)
             .collect();
-            
-        let vocal_shva_preds: Vec<bool> = additional_logits
-            .slice(ndarray::s![0, .., 1])
-            .iter()
-            .map(|&x| x > 0.0)
+        let vocal_shva_preds: Vec<bool> = (0..add_seq)
+            .map(|t| add_data[t * add_cols + 1] > 0.0)
             .collect();
-            
-        let prefix_preds: Vec<bool> = additional_logits
-            .slice(ndarray::s![0, .., 2])
-            .iter()
-            .map(|&x| x > 0.0)
+        let prefix_preds: Vec<bool> = (0..add_seq)
+            .map(|t| add_data[t * add_cols + 2] > 0.0)
             .collect();
 
         // 7. Reconstruct Hebrew string using offset mapping
