@@ -1,3 +1,4 @@
+pub mod expander;
 mod model;
 
 use anyhow::Result;

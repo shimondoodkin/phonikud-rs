@@ -498,6 +498,7 @@ dependencies = [
  "ndarray",
  "ort",
  "regex",
+ "serde_json",
  "tokenizers",
 ]
 
