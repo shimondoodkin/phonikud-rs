@@ -13,6 +13,10 @@ Rust port of the [phonikud](https://github.com/thewh1teagle/phonikud) project �
 - Lightweight: Runs with ONNX without heavy dependencies 🛠️
 - Dual mode: Output nikud male (fully marked) and nikud haser 💡
 
+## Note
+
+This crate uses `ndarray 0.17` which is incompatible with `ndarray 0.16`. If your project depends on `ndarray 0.16`, you will need to upgrade to `0.17`.
+
 ## Setup
 
 Add to your `Cargo.toml`:
