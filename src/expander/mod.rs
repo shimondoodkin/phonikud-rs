@@ -75,6 +75,10 @@ fn normalize_unicode(text: &str) -> String {
 }
 
 fn expand_token_pipeline(text: &str) -> String {
+    // Dictionary lookup first — if the whole token maps to IPA, use it directly
+    if let Some(ipa) = dictionary::lookup(text) {
+        return ipa;
+    }
     let mut result = text.to_string();
     result = punctuation::expand_punctuation(&result);
     result = hebrew_chars::expand_geresh(&result);
