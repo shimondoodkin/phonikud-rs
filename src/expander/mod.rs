@@ -10,6 +10,26 @@ pub mod numbers;
 pub mod punctuation;
 pub mod time;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextSpan {
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExpandedToken {
+    pub original_span: TextSpan,
+    pub expanded_span: TextSpan,
+    pub original_text: String,
+    pub expanded_text: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExpandedText {
+    pub text: String,
+    pub tokens: Vec<ExpandedToken>,
+}
+
 /// Normalize unicode characters: replace newlines with spaces, normalize
 /// various dashes, quotes, and whitespace to ASCII equivalents.
 fn normalize_unicode(text: &str) -> String {
@@ -54,14 +74,77 @@ fn normalize_unicode(text: &str) -> String {
     result.trim().to_string()
 }
 
-/// Expand dates, times, and numbers in `text` to Hebrew words (with nikud).
-/// This should run before phonemization.
-pub fn expand_text(text: &str) -> String {
-    let mut result = normalize_unicode(text);
+fn expand_token_pipeline(text: &str) -> String {
+    let mut result = text.to_string();
     result = punctuation::expand_punctuation(&result);
     result = hebrew_chars::expand_geresh(&result);
     result = dates::expand_dates(&result);
     result = time::expand_times(&result);
     result = numbers::expand_numbers(&result);
     result
+}
+
+fn tokenize_with_spans(text: &str) -> Vec<(TextSpan, String)> {
+    let mut tokens = Vec::new();
+    let mut current_start: Option<usize> = None;
+
+    for (idx, ch) in text.char_indices() {
+        if ch.is_whitespace() {
+            if let Some(start) = current_start.take() {
+                tokens.push((
+                    TextSpan { start, end: idx },
+                    text[start..idx].to_string(),
+                ));
+            }
+        } else if current_start.is_none() {
+            current_start = Some(idx);
+        }
+    }
+
+    if let Some(start) = current_start {
+        tokens.push((
+            TextSpan {
+                start,
+                end: text.len(),
+            },
+            text[start..].to_string(),
+        ));
+    }
+
+    tokens
+}
+
+pub fn expand_text_with_spans(text: &str) -> ExpandedText {
+    let normalized_input = normalize_unicode(text);
+    let mut expanded = String::new();
+    let mut tokens = Vec::new();
+
+    for (original_span, token_text) in tokenize_with_spans(&normalized_input) {
+        let expanded_text = expand_token_pipeline(&token_text);
+        if expanded_text.is_empty() {
+            continue;
+        }
+
+        if !expanded.is_empty() {
+            expanded.push(' ');
+        }
+        let start = expanded.len();
+        expanded.push_str(&expanded_text);
+        let end = expanded.len();
+
+        tokens.push(ExpandedToken {
+            original_span,
+            expanded_span: TextSpan { start, end },
+            original_text: token_text,
+            expanded_text,
+        });
+    }
+
+    ExpandedText { text: expanded, tokens }
+}
+
+/// Expand dates, times, and numbers in `text` to Hebrew words (with nikud).
+/// This should run before phonemization.
+pub fn expand_text(text: &str) -> String {
+    expand_text_with_spans(text).text
 }
